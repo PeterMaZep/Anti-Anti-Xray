@@ -1,6 +1,10 @@
 package net.pwindows.anti_anti_xray.client;
 import com.mojang.blaze3d.platform.InputConstants;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
 import net.pwindows.anti_anti_xray.Anti_anti_xray;
 
 import net.fabricmc.api.ClientModInitializer;
@@ -11,7 +15,16 @@ import org.lwjgl.glfw.GLFW;
 public class Anti_anti_xrayClient implements ClientModInitializer {
 
     @Override
-    public void onInitializeClient() {
+    public void onInitializeClient()
+    {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            while (this.OPEN_SETTINGS.consumeClick()) {
+                Screen currentScreen = Minecraft.getInstance().screen;
+                Minecraft.getInstance().setScreen(
+                        new SettingsScreen(Component.empty(), currentScreen)
+                );
+            }
+        });
     }
 
     KeyMapping.Category CATEGORY = KeyMapping.Category.register(
