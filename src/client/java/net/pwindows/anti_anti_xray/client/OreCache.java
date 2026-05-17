@@ -18,6 +18,11 @@ public class OreCache {
 
     public record CachedOre(BlockPos pos, BlockState state, boolean exposed) {}
 
+    // Helper to pack chunk coordinates into a long key (standard Minecraft encoding)
+    private static long chunkKey(int chunkX, int chunkZ) {
+        return ((long)chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+    }
+
     public static void setSeed(String seedString) {
         try {
             worldSeed = Long.parseLong(seedString);
@@ -38,8 +43,8 @@ public class OreCache {
     public static BlockState getTrueBlockState(BlockPos pos) {
         if (!hasSeed || activeRules.isEmpty()) return null;
 
-        long chunkKey = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4).toLong();
-        List<CachedOre> ores = chunkCache.get(chunkKey);
+        long key = chunkKey(pos.getX() >> 4, pos.getZ() >> 4);
+        List<CachedOre> ores = chunkCache.get(key);
 
         if (ores == null) return null;
 
@@ -54,19 +59,20 @@ public class OreCache {
     public static void calculateForChunk(LevelChunk chunk) {
         if (!hasSeed || activeRules.isEmpty()) return;
 
-        long chunkKey = new ChunkPos(chunk.getPos().x(), chunk.getPos().z()).toLong();
-        if (chunkCache.containsKey(chunkKey)) return;
+        ChunkPos chunkPos = chunk.getPos();
+        long key = chunkKey(chunkPos.x(), chunkPos.z());
+        if (chunkCache.containsKey(key)) return;
 
         List<CachedOre> ores = new ArrayList<>();
 
         for (DatapackParser.OreRule rule : activeRules) {
             if (rule.count <= 0 || rule.oreBlock == null) continue;
 
-            Random random = createChunkRandom(chunk.getPos(), rule);
+            Random random = createChunkRandom(chunkPos, rule);
 
             for (int i = 0; i < rule.count; i++) {
-                int minX = chunk.getPos().x() << 4;
-                int minZ = chunk.getPos().z() << 4;
+                int minX = chunkPos.x() << 4;
+                int minZ = chunkPos.z() << 4;
                 int x = minX + random.nextInt(16);
                 int z = minZ + random.nextInt(16);
                 int y = getRandomHeight(random, rule);
@@ -76,7 +82,7 @@ public class OreCache {
             }
         }
 
-        chunkCache.put(chunkKey, ores);
+        chunkCache.put(key, ores);
     }
 
     private static Random createChunkRandom(ChunkPos chunkPos, DatapackParser.OreRule rule) {
@@ -115,7 +121,7 @@ public class OreCache {
 
             BlockPos pos = center.offset(dx, dy, dz);
 
-            // Keep within the chunk horizontally
+            // Ensure we stay inside the chunk horizontally
             if (pos.getX() >> 4 != center.getX() >> 4 ||
                     pos.getZ() >> 4 != center.getZ() >> 4) continue;
 
@@ -156,6 +162,7 @@ public class OreCache {
     }
 
     public static void onChunkUnload(LevelChunk chunk) {
-        chunkCache.remove(new ChunkPos(chunk.getPos().x(), chunk.getPos().z()).toLong());
+        ChunkPos chunkPos = chunk.getPos();
+        chunkCache.remove(chunkKey(chunkPos.x(), chunkPos.z()));
     }
 }
