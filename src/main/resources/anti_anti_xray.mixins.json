@@ -3,7 +3,12 @@
   "minVersion": "0.8",
   "package": "net.pwindows.anti_anti_xray.mixin",
   "compatibilityLevel": "JAVA_25",
+  "client": [
+    "LevelMixin",
+    "ChunkLoadMixin"
+  ],
   "mixins": [
+
   ],
   "injectors": {
     "defaultRequire": 1

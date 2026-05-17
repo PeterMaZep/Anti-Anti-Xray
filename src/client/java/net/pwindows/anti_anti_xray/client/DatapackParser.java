@@ -1,8 +1,9 @@
 package net.pwindows.anti_anti_xray.client;
 
 import com.google.gson.*;
+import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLoction;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 
@@ -14,36 +15,44 @@ import java.util.zip.*;
 public class DatapackParser {
 
     public static class OreRule {
-        public Block oreBlock;          // e.g., Blocks.DIAMOND_ORE
-        public Block[] replaceTargets;  // e.g., [Blocks.STONE, Blocks.DEEPSLATE]
-        public int veinSize;            // max blocks per vein
-        public float discardChance;     // air exposure discard chance
-        public int count;               // veins per chunk
-        public int minY, maxY;          // height range
+        public Block oreBlock;
+        public List<Block> replaceTargets = new ArrayList<>();
+        public int veinSize;
+        public float discardChance;
+        public int count;
+        public int minY, maxY;
+        public String heightProviderType;
+        public int plateau;
 
-        // Trapezoid distribution params from height provider
-        public String heightProviderType; // "uniform" or "trapezoid"
-        public int plateau;             // for trapezoid
+        @Override
+        public String toString() {
+            return "OreRule{" +
+                    "oreBlock=" + oreBlock +
+                    ", replaceTargets=" + replaceTargets +
+                    ", veinSize=" + veinSize +
+                    ", count=" + count +
+                    ", height=[" + minY + "," + maxY + "]" +
+                    '}';
+        }
     }
 
-    private Map<String, List<OreRule>> dimensionRules = new HashMap<>();
+    private final Map<String, List<OreRule>> dimensionRules = new HashMap<>();
 
     public void parseDatapack(File zipFile) throws IOException {
         Map<String, JsonObject> configuredFeatures = new HashMap<>();
         Map<String, JsonObject> placedFeatures = new HashMap<>();
 
-        // Extract and parse JSONs from zip
         try (ZipFile zip = new ZipFile(zipFile)) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
 
-                if (name.startsWith("data/") && name.endsWith(".json")) {
-                    // Skip non-worldgen files
-                    if (!name.contains("worldgen/configured_feature") &&
-                            !name.contains("worldgen/placed_feature")) continue;
+                if (!name.startsWith("data/") || !name.endsWith(".json")) continue;
+                if (!name.contains("worldgen/configured_feature") &&
+                        !name.contains("worldgen/placed_feature")) continue;
 
+                try {
                     JsonObject json = JsonParser.parseReader(
                             new InputStreamReader(zip.getInputStream(entry))
                     ).getAsJsonObject();
@@ -55,111 +64,128 @@ public class DatapackParser {
                     } else if (name.contains("placed_feature")) {
                         placedFeatures.put(key, json);
                     }
+                } catch (Exception e) {
+                    System.err.println("Failed to parse: " + name + " - " + e.getMessage());
                 }
             }
         }
 
-        // Link placed features to configured features
+        System.out.println("Found " + configuredFeatures.size() + " configured features");
+        System.out.println("Found " + placedFeatures.size() + " placed features");
+
         for (Map.Entry<String, JsonObject> entry : placedFeatures.entrySet()) {
+            String placedKey = entry.getKey();
             JsonObject placed = entry.getValue();
-            JsonArray placements = placed.getAsJsonArray("placement");
 
-            // Find the feature reference
-            String featureId = placed.get("feature").getAsString();
-            JsonObject configured = configuredFeatures.get(featureId.split(":")[1]);
+            try {
+                String featureRef = placed.get("feature").getAsString();
+                String featureId;
+                if (featureRef.contains(":")) {
+                    featureId = featureRef.split(":")[1];
+                } else {
+                    featureId = featureRef;
+                }
 
-            if (configured == null || !configured.get("type").getAsString().equals("minecraft:ore")) {
-                continue; // Not an ore feature
-            }
+                JsonObject configured = configuredFeatures.get(featureId);
+                if (configured == null) {
+                    System.out.println("No configured feature found for: " + featureId);
+                    continue;
+                }
 
-            OreRule rule = parseOreRule(configured, placements);
-            if (rule != null) {
-                // Group by dimension from biome filters in placement
-                String dimension = extractDimension(placements);
-                dimensionRules.computeIfAbsent(dimension, k -> new ArrayList<>()).add(rule);
+                String type = configured.get("type").getAsString();
+                if (!type.equals("minecraft:ore") && !type.equals("minecraft:ore_feature")) {
+                    continue;
+                }
+
+                JsonArray placements = placed.getAsJsonArray("placement");
+                OreRule rule = parseOreRule(configured, placements);
+
+                if (rule != null && rule.oreBlock != null) {
+                    dimensionRules.computeIfAbsent("overworld", k -> new ArrayList<>()).add(rule);
+                    System.out.println("Parsed ore rule: " + rule);
+                }
+            } catch (Exception e) {
+                System.err.println("Failed to process placed feature " + placedKey + ": " + e.getMessage());
             }
         }
+
+        System.out.println("Total ore rules parsed: " + dimensionRules.values().stream().mapToInt(List::size).sum());
     }
 
     private OreRule parseOreRule(JsonObject configured, JsonArray placements) {
-        JsonObject config = configured.getAsJsonObject("config");
         OreRule rule = new OreRule();
 
-        // Parse targets (what blocks get replaced)
-        JsonArray targets = config.getAsJsonArray("targets");
-        List<Block> replaceBlocks = new ArrayList<>();
-        Block oreBlock = null;
+        try {
+            JsonObject config = configured.getAsJsonObject("config");
 
-        for (JsonElement target : targets) {
-            JsonObject t = target.getAsJsonObject();
-            // The "target" field has a block predicate for what to replace
-            // The "state" field has what block to place
-            JsonObject state = t.getAsJsonObject("state");
-            String oreName = state.get("Name").getAsString();
-            oreBlock = BuiltInRegistries.BLOCK.get(new ResourceLocation(oreName));
+            JsonArray targets = config.getAsJsonArray("targets");
+            for (JsonElement target : targets) {
+                JsonObject t = target.getAsJsonObject();
+                JsonObject state = t.getAsJsonObject("state");
+                String oreName = state.get("Name").getAsString();
+                Identifier oreId = Identifier.tryParse(oreName);
 
-            // Parse the target predicate - usually a list of blocks
-            JsonObject targetPredicate = t.getAsJsonObject("target");
-            if (targetPredicate.has("blocks")) {
-                JsonArray blocks = targetPredicate.getAsJsonArray("blocks");
-                for (JsonElement b : blocks) {
-                    Block replaceBlock = BuiltInRegistries.BLOCK.get(
-                            new ResourceLocation(b.getAsString())
-                    );
-                    replaceBlocks.add(replaceBlock);
+                // Fixed: get() returns Optional<Holder.Reference<Block>>
+                Block oreBlock = BuiltInRegistries.BLOCK.get(oreId)
+                        .map(Holder.Reference::value)
+                        .orElse(null);
+                if (rule.oreBlock == null && oreBlock != null) {
+                    rule.oreBlock = oreBlock;
+                }
+
+                JsonObject targetPredicate = t.getAsJsonObject("target");
+                if (targetPredicate.has("blocks")) {
+                    JsonArray blocks = targetPredicate.getAsJsonArray("blocks");
+                    for (JsonElement b : blocks) {
+                        Identifier blockId = Identifier.tryParse(b.getAsString());
+                        Block replaceBlock = BuiltInRegistries.BLOCK.get(blockId)
+                                .map(Holder.Reference::value)
+                                .orElse(null);
+                        if (replaceBlock != null && replaceBlock != Blocks.AIR) {
+                            rule.replaceTargets.add(replaceBlock);
+                        }
+                    }
                 }
             }
-        }
 
-        rule.oreBlock = oreBlock;
-        rule.replaceTargets = replaceBlocks.toArray(new Block[0]);
-        rule.veinSize = config.get("size").getAsInt();
-        rule.discardChance = config.has("discard_chance_on_air_exposure")
-                ? config.get("discard_chance_on_air_exposure").getAsFloat()
-                : 0.0f;
+            rule.veinSize = config.get("size").getAsInt();
 
-        // Parse placements
-        for (JsonElement p : placements) {
-            JsonObject placement = p.getAsJsonObject();
-            String type = placement.get("type").getAsString();
+            if (config.has("discard_chance_on_air_exposure")) {
+                rule.discardChance = config.get("discard_chance_on_air_exposure").getAsFloat();
+            }
 
-            if (type.equals("minecraft:count")) {
-                rule.count = placement.get("count").getAsInt();
-            } else if (type.equals("minecraft:height_range")) {
-                JsonObject height = placement.getAsJsonObject("height");
-                rule.heightProviderType = height.get("type").getAsString();
+            for (JsonElement p : placements) {
+                JsonObject placement = p.getAsJsonObject();
+                String type = placement.get("type").getAsString();
 
-                if (rule.heightProviderType.equals("minecraft:uniform")) {
-                    JsonObject min = height.getAsJsonObject("min_inclusive");
-                    JsonObject max = height.getAsJsonObject("max_inclusive");
-                    rule.minY = min.get("absolute").getAsInt();
-                    rule.maxY = max.get("absolute").getAsInt();
-                } else if (rule.heightProviderType.equals("minecraft:trapezoid")) {
-                    rule.minY = height.get("min_inclusive").getAsJsonObject()
-                            .get("absolute").getAsInt();
-                    rule.maxY = height.get("max_inclusive").getAsJsonObject()
-                            .get("absolute").getAsInt();
-                    rule.plateau = height.has("plateau")
-                            ? height.get("plateau").getAsInt() : 0;
+                if (type.equals("minecraft:count")) {
+                    rule.count = placement.get("count").getAsInt();
+                } else if (type.equals("minecraft:height_range")) {
+                    JsonObject height = placement.getAsJsonObject("height");
+                    rule.heightProviderType = height.get("type").getAsString();
+
+                    if (rule.heightProviderType.equals("minecraft:uniform")) {
+                        JsonObject min = height.getAsJsonObject("min_inclusive");
+                        JsonObject max = height.getAsJsonObject("max_inclusive");
+                        rule.minY = min.get("absolute").getAsInt();
+                        rule.maxY = max.get("absolute").getAsInt();
+                    } else if (rule.heightProviderType.equals("minecraft:trapezoid")) {
+                        rule.minY = height.getAsJsonObject("min_inclusive")
+                                .get("absolute").getAsInt();
+                        rule.maxY = height.getAsJsonObject("max_inclusive")
+                                .get("absolute").getAsInt();
+                        if (height.has("plateau")) {
+                            rule.plateau = height.get("plateau").getAsInt();
+                        }
+                    }
                 }
             }
+        } catch (Exception e) {
+            System.err.println("Error parsing ore rule: " + e.getMessage());
+            return null;
         }
 
         return rule;
-    }
-
-    private String extractDimension(JsonArray placements) {
-        // Check for biome-based placement filters to determine dimension
-        // This is simplified — a full implementation needs to check biome tags
-        for (JsonElement p : placements) {
-            JsonObject placement = p.getAsJsonObject();
-            if (placement.get("type").getAsString().equals("minecraft:biome")) {
-                // Parse biome filter to determine dimension
-                // For now, default to overworld
-                return "overworld";
-            }
-        }
-        return "overworld"; // Default
     }
 
     public List<OreRule> getRulesForDimension(String dimension) {
