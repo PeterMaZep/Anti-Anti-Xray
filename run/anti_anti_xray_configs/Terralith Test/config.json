@@ -1,9 +1,0 @@
-{
-  "seeds": {
-    "ResourceKey[minecraft:dimension / minecraft:overworld]": "-6384763642555605215",
-    "ResourceKey_minecraft_dimension___minecraft_overworld_": "-6384763642555605215"
-  },
-  "datapacks": {
-    "ResourceKey_minecraft_dimension___minecraft_overworld_": "D:\\Projects\\Anti Anti Xray\\run\\anti_anti_xray_configs\\datapacks\\Terralith Test\\ResourceKey_minecraft_dimension___minecraft_overworld_\\Terralith_26.1_v2.6.2.zip"
-  }
-}
