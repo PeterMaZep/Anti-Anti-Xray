@@ -2,11 +2,13 @@ package net.pwindows.anti_anti_xray.client;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
-
+import net.minecraft.world.level.levelgen.WorldgenRandom;
 import java.util.*;
 
 public class OreCache {
@@ -16,11 +18,11 @@ public class OreCache {
     private static boolean hasSeed = false;
     private static List<DatapackParser.OreRule> activeRules = new ArrayList<>();
 
-    public record CachedOre(BlockPos pos, BlockState state, boolean exposed) {}
+    public record CachedOre(BlockPos pos, BlockState state, boolean exposed) {
+    }
 
-    // Helper to pack chunk coordinates into a long key (standard Minecraft encoding)
     private static long chunkKey(int chunkX, int chunkZ) {
-        return ((long)chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+        return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
     }
 
     public static void setSeed(String seedString) {
@@ -31,29 +33,15 @@ public class OreCache {
         }
         hasSeed = true;
         clearCache();
-        System.out.println("OreCache seed set to: " + worldSeed);
     }
 
     public static void setRules(List<DatapackParser.OreRule> rules) {
         activeRules = rules != null ? rules : new ArrayList<>();
         clearCache();
-        System.out.println("OreCache rules updated: " + activeRules.size() + " rules");
     }
 
-    public static BlockState getTrueBlockState(BlockPos pos) {
-        if (!hasSeed || activeRules.isEmpty()) return null;
-
-        long key = chunkKey(pos.getX() >> 4, pos.getZ() >> 4);
-        List<CachedOre> ores = chunkCache.get(key);
-
-        if (ores == null) return null;
-
-        for (CachedOre ore : ores) {
-            if (ore.pos.equals(pos)) {
-                return ore.state;
-            }
-        }
-        return null;
+    public static List<CachedOre> getOresForChunk(ChunkPos pos) {
+        return chunkCache.get(chunkKey(pos.x(), pos.z()));
     }
 
     public static void calculateForChunk(LevelChunk chunk) {
@@ -65,95 +53,121 @@ public class OreCache {
 
         List<CachedOre> ores = new ArrayList<>();
 
+        // Step 1: Derive the decoration seed for this chunk
+        WorldgenRandom baseRandom = new WorldgenRandom(WorldgenRandom.Algorithm.XOROSHIRO.newInstance(worldSeed));
+        long decorationSeed = baseRandom.setDecorationSeed(worldSeed, chunkPos.x(), chunkPos.z());
+
         for (DatapackParser.OreRule rule : activeRules) {
-            if (rule.count <= 0 || rule.oreBlock == null) continue;
+            if (rule.count <= 0 || rule.oreBlock == null || rule.featureIndex < 0) continue;
 
-            Random random = createChunkRandom(chunkPos, rule);
+            // Step 2: Create the feature-specific random using the exact Minecraft seeding
+            WorldgenRandom featureRandom = new WorldgenRandom(WorldgenRandom.Algorithm.XOROSHIRO.newInstance(0));
+            featureRandom.setFeatureSeed(decorationSeed, rule.featureIndex, rule.generationStep);
 
-            for (int i = 0; i < rule.count; i++) {
-                int minX = chunkPos.x() << 4;
-                int minZ = chunkPos.z() << 4;
-                int x = minX + random.nextInt(16);
-                int z = minZ + random.nextInt(16);
-                int y = getRandomHeight(random, rule);
-
+            int count = rule.count;
+            for (int i = 0; i < count; i++) {
+                // InSquarePlacement: random X/Z within chunk
+                int x = (chunkPos.x() << 4) + featureRandom.nextInt(16);
+                int z = (chunkPos.z() << 4) + featureRandom.nextInt(16);
+                // HeightProvider
+                int y = sampleHeight(featureRandom, rule);
                 BlockPos center = new BlockPos(x, y, z);
-                generateVein(random, center, rule, ores, chunk);
+                // Use the real OreFeature placement logic
+                placeOreVein(featureRandom, center, rule, ores, chunk);
             }
         }
-
         chunkCache.put(key, ores);
     }
 
-    private static Random createChunkRandom(ChunkPos chunkPos, DatapackParser.OreRule rule) {
-        long seed = worldSeed;
-        seed = seed * 6364136223846793005L + 1442695040888963407L;
-        seed += chunkPos.x() * 0x4f9939f508L;
-        seed = seed * 6364136223846793005L + 1442695040888963407L;
-        seed += chunkPos.z() * 0x1ef1565bd5L;
-        seed = seed * 6364136223846793005L + 1442695040888963407L;
-        seed += rule.oreBlock.hashCode();
-        return new Random(seed);
-    }
-
-    private static int getRandomHeight(Random random, DatapackParser.OreRule rule) {
-        if ("minecraft:uniform".equals(rule.heightProviderType)) {
-            return rule.minY + random.nextInt(rule.maxY - rule.minY + 1);
+    private static int sampleHeight(WorldgenRandom random, DatapackParser.OreRule rule) {
+        int min = rule.minY, max = rule.maxY;
+        if (rule.heightProviderType.equals("minecraft:trapezoid")) {
+            int range = max - min;
+            int plateau = rule.plateau;
+            if (plateau >= range) return Mth.randomBetweenInclusive(random, min, max);
+            int plateauStart = (range - plateau) / 2;
+            int plateauEnd = range - plateauStart;
+            return min + Mth.randomBetweenInclusive(random, 0, plateauEnd) + Mth.randomBetweenInclusive(random, 0, plateauStart);
         } else {
-            int range = rule.maxY - rule.minY;
-            return rule.minY + random.nextInt(range + 1);
+            return Mth.randomBetweenInclusive(random, min, max);
         }
     }
 
-    private static void generateVein(Random random, BlockPos center,
-                                     DatapackParser.OreRule rule,
+    // Replicates OreFeature.place() vein shape
+    private static void placeOreVein(WorldgenRandom random, BlockPos origin, DatapackParser.OreRule rule,
                                      List<CachedOre> ores, LevelChunk chunk) {
+        float dir = random.nextFloat() * (float) Math.PI;
+        float spreadXY = rule.veinSize / 8.0F;
+        int maxRadius = Mth.ceil((rule.veinSize / 16.0F * 2.0F + 1.0F) / 2.0F);
+        double x0 = origin.getX() + Math.sin(dir) * spreadXY;
+        double x1 = origin.getX() - Math.sin(dir) * spreadXY;
+        double z0 = origin.getZ() + Math.cos(dir) * spreadXY;
+        double z1 = origin.getZ() - Math.cos(dir) * spreadXY;
+        double y0 = origin.getY() + random.nextInt(3) - 2;
+        double y1 = origin.getY() + random.nextInt(3) - 2;
+
         int size = rule.veinSize;
-        int placed = 0;
-        int attempts = size * 3;
+        double[] data = new double[size * 4];
+        for (int i = 0; i < size; i++) {
+            float step = (float) i / size;
+            double xx = Mth.lerp(step, x0, x1);
+            double yy = Mth.lerp(step, y0, y1);
+            double zz = Mth.lerp(step, z0, z1);
+            double ss = random.nextDouble() * size / 16.0;
+            double r = ((Math.sin(Math.PI * step) + 1.0F) * ss + 1.0) / 2.0;
+            data[i * 4] = xx;
+            data[i * 4 + 1] = yy;
+            data[i * 4 + 2] = zz;
+            data[i * 4 + 3] = r;
+        }
 
-        for (int attempt = 0; attempt < attempts && placed < size; attempt++) {
-            int dx = random.nextInt(size + 1) - size / 2;
-            int dy = random.nextInt(size + 1) - size / 2;
-            int dz = random.nextInt(size + 1) - size / 2;
+        for (int i = 0; i < size; i++) {
+            double r = data[i * 4 + 3];
+            if (r < 0.0) continue;
+            double xx = data[i * 4], yy = data[i * 4 + 1], zz = data[i * 4 + 2];
+            int xMin = Math.max(Mth.floor(xx - r), origin.getX() - maxRadius);
+            int yMin = Math.max(Mth.floor(yy - r), origin.getY() - 2 - maxRadius);
+            int zMin = Math.max(Mth.floor(zz - r), origin.getZ() - maxRadius);
+            int xMax = Mth.floor(xx + r);
+            int yMax = Mth.floor(yy + r);
+            int zMax = Mth.floor(zz + r);
 
-            if (dx * dx + dy * dy + dz * dz > (size / 2.0) * (size / 2.0)) continue;
-
-            BlockPos pos = center.offset(dx, dy, dz);
-
-            // Ensure we stay inside the chunk horizontally
-            if (pos.getX() >> 4 != center.getX() >> 4 ||
-                    pos.getZ() >> 4 != center.getZ() >> 4) continue;
-
-            BlockState existing = chunk.getBlockState(pos);
-
-            boolean canReplace = false;
-            for (Block target : rule.replaceTargets) {
-                if (existing.is(target)) {
-                    canReplace = true;
-                    break;
+            for (int x = xMin; x <= xMax; x++) {
+                double xd = (x + 0.5 - xx) / r;
+                if (xd * xd >= 1.0) continue;
+                for (int y = yMin; y <= yMax; y++) {
+                    double yd = (y + 0.5 - yy) / r;
+                    if (xd * xd + yd * yd >= 1.0) continue;
+                    for (int z = zMin; z <= zMax; z++) {
+                        double zd = (z + 0.5 - zz) / r;
+                        if (xd * xd + yd * yd + zd * zd >= 1.0) continue;
+                        BlockPos pos = new BlockPos(x, y, z);
+                        if (pos.getX() >> 4 != origin.getX() >> 4 || pos.getZ() >> 4 != origin.getZ() >> 4) continue;
+                        BlockState existing = chunk.getBlockState(pos);
+                        boolean canPlace = false;
+                        for (Block target : rule.replaceTargets) {
+                            if (existing.is(target)) {
+                                canPlace = true;
+                                break;
+                            }
+                        }
+                        if (!canPlace) continue;
+                        boolean exposed = isExposedToAir(pos, chunk);
+                        if (exposed && random.nextFloat() < rule.discardChance) continue;
+                        ores.add(new CachedOre(pos.immutable(), rule.oreBlock.defaultBlockState(), exposed));
+                    }
                 }
             }
-            if (!canReplace) continue;
-
-            boolean exposed = isExposedToAir(pos, chunk);
-            if (exposed && random.nextFloat() < rule.discardChance) continue;
-
-            ores.add(new CachedOre(pos.immutable(), rule.oreBlock.defaultBlockState(), exposed));
-            placed++;
         }
     }
 
     private static boolean isExposedToAir(BlockPos pos, LevelChunk chunk) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                    BlockPos neighbor = pos.offset(dx, dy, dz);
-                    if (chunk.getBlockState(neighbor).isAir()) return true;
+                    if (chunk.getBlockState(pos.offset(dx, dy, dz)).isAir()) return true;
                 }
-            }
-        }
         return false;
     }
 
@@ -162,7 +176,6 @@ public class OreCache {
     }
 
     public static void onChunkUnload(LevelChunk chunk) {
-        ChunkPos chunkPos = chunk.getPos();
-        chunkCache.remove(chunkKey(chunkPos.x(), chunkPos.z()));
+        chunkCache.remove(chunkKey(chunk.getPos().x(), chunk.getPos().z()));
     }
 }

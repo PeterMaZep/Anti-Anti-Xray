@@ -4,6 +4,7 @@
   "package": "net.pwindows.anti_anti_xray.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
+
   ],
   "injectors": {
     "defaultRequire": 1
